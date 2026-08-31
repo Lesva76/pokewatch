@@ -378,6 +378,29 @@ def listing_from_jsonld(soup, base):
     return out
 
 
+def listing_from_microdata(soup, base):
+    """schema.org en microdata (itemtype=Product) — ex. Micromania."""
+    out = []
+    for card in soup.select('[itemtype*="schema.org/Product"]'):
+        n = card.select_one("[itemprop=name]")
+        if not n:
+            continue
+        title = norm(n.get("content") or n.get_text())
+        pr = card.select_one("[itemprop=price]")
+        price = None
+        if pr:
+            price = parse_price((pr.get("content") or pr.get_text()) + " €")
+        av = card.select_one("[itemprop=availability]")
+        avs = (av.get("href") or av.get("content") or av.get_text() or "").lower() if av else ""
+        avail = not ("outofstock" in avs or "soldout" in avs or "discontinued" in avs)
+        a = card.select_one("[itemprop=url]") or card.select_one("a[href]")
+        link = (a.get("href") or a.get("content") or "") if a else ""
+        if link and not link.startswith("http"):
+            link = base + ("" if link.startswith("/") else "/") + link
+        out.append({"key": link or title, "title": title, "price": price, "link": link or base, "available": avail})
+    return out
+
+
 def listing_from_selectors(soup, base, sel):
     out = []
     for card in soup.select(sel["item"]):
@@ -409,8 +432,12 @@ def src_listing(cfg, src, state, warmup):
         log(f"[listing] {src['name']} → erreur {e}")
         return []
     products = listing_from_jsonld(soup, base)
+    if not products:
+        products = listing_from_microdata(soup, base)
     if not products and src.get("selectors"):
         products = listing_from_selectors(soup, base, src["selectors"])
+    if not products:
+        log(f"[listing] {src['name']} → 0 produit (HTML {len(r.text)} o, titre: {norm(soup.title.get_text()) if soup.title else '?'})")
     log(f"[listing] {src['name']} → {len(products)} produits")
     if not products:
         return []
