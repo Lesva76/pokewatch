@@ -2,7 +2,7 @@ name: pokewatch
 
 on:
   schedule:
-    - cron: "*/10 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -28,7 +28,7 @@ jobs:
 
       - name: Run watcher
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL || secrets.LESVA }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           EXTRA_FEEDS: ${{ secrets.EXTRA_FEEDS }}
         run: python watcher.py
 
