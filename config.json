@@ -1,16 +1,13 @@
 {
   "_note": "Seuils = prix max (€) par type. Au-dessus → pas d'alerte. Ajuste selon le marché (PVC FR 2026 ≈ booster 5-6 €, display 36 ≈ 190-240 €, ETB ≈ 55-60 €).",
-
   "must_match": ["pok[eé]mon", "pkmn", "\\btcg\\b", "jcc pok"],
-
   "exclude": [
     "peluche", "figurine", "funko", "lego", "mega construx", "sac [àa] dos", "classeur", "portfolio",
     "sleeves", "prot[èe]ge[- ]cartes", "playmat", "tapis de jeu", "deck box", "\\bswitch\\b", "jeu vid[ée]o",
     "manette", "console", "amiibo", "t-shirt", "pyjama", "gourde", "trousse", "cahier", "agenda", "puzzle",
     "lot de \\d+ cartes", "carte [àa] l.unit[ée]", "\\bsingle", "psa \\d", "grad[ée]e", "cor[ée]en", "japonais", "japanese",
-    "\\bjp\\b", "\\bkr\\b", "chinois", "\\banglais\\b", "\\ben\\b(?! )"
+    "\\bjp\\b", "\\bkr\\b", "chinois", "\\banglais\\b", "\\ben\\b(?! )", "occasion", "pack commun", "pack rare"
   ],
-
   "max_price": {
     "display":      189.0,
     "demi_display":  99.0,
@@ -22,37 +19,27 @@
     "blister":        7.0,
     "booster":        5.0
   },
-
   "alert_if_price_unknown": true,
   "alert_untyped_pokemon_deals": false,
   "alert_restock": true,
-
   "sources": [
     {"type": "rss", "name": "Dealabs nouveaux", "url": "https://www.dealabs.com/rss/nouveaux", "enabled": true},
     {"type": "rss", "name": "Dealabs hot",      "url": "https://www.dealabs.com/rss/hot",      "enabled": true},
-
-    {"type": "shopify", "name": "RelicTCG",   "url": "https://www.relictcg.com",   "enabled": true},
-    {"type": "shopify", "name": "Boostrclub", "url": "https://boostrclub.com",     "enabled": true},
-
-    {"type": "listing", "name": "Micromania Pokémon TCG", "enabled": true,
-     "url": "https://www.micromania.fr/cartes-a-collectionner-pokemon.html"},
-    {"type": "listing", "name": "Cultura Pokémon", "enabled": true,
-     "url": "https://www.cultura.com/jeux-de-societe/cartes-a-collectionner/pokemon.html"},
-    {"type": "listing", "name": "King Jouet Pokémon", "enabled": true,
-     "url": "https://www.king-jouet.com/jeux-jouets/jeux-de-societe/cartes-a-collectionner/pokemon"},
-    {"type": "listing", "name": "JouéClub Pokémon", "enabled": true,
-     "url": "https://www.joueclub.fr/cartes-a-collectionner/pokemon.html"},
-    {"type": "listing", "name": "Smyths Pokémon", "enabled": true,
-     "url": "https://www.smythstoys.com/fr/fr-fr/jouets/cartes-a-collectionner/pokemon/c/SM100285"},
-    {"type": "listing", "name": "Philibert Pokémon", "enabled": true,
-     "url": "https://www.philibertnet.com/fr/2716-pokemon"},
-
-    {"type": "listing", "name": "Exemple PrestaShop (sélecteurs manuels)", "enabled": false,
-     "url": "https://exemple-boutique.fr/123-pokemon",
+    {"type": "shopify", "name": "RelicTCG",   "url": "https://www.relictcg.com", "enabled": true},
+    {"type": "shopify", "name": "Boostrclub", "url": "https://boostrclub.com",   "enabled": true},
+    {"type": "listing", "name": "Micromania cartes Pokémon", "enabled": true, "url": "https://www.micromania.fr/c/cartespokemon"},
+    {"type": "listing", "name": "Micromania displays",       "enabled": true, "url": "https://www.micromania.fr/c/display-cartes-pokemon"},
+    {"type": "listing", "name": "Micromania boosters",       "enabled": true, "url": "https://www.micromania.fr/c/booster-cartes-pokemon"},
+    {"type": "listing", "name": "Cultura display Pokémon", "enabled": true,
+     "url": "https://www.cultura.com/search/results?search_query=display%20pokemon",
+     "selectors": {"item": "article.one-card--product", "title": ".one-product__desc__name", "price": ".price", "link": "a.one-product"}},
+    {"type": "listing", "name": "Cultura coffret Pokémon", "enabled": true,
+     "url": "https://www.cultura.com/search/results?search_query=coffret%20pokemon",
+     "selectors": {"item": "article.one-card--product", "title": ".one-product__desc__name", "price": ".price", "link": "a.one-product"}},
+    {"type": "listing", "name": "King Jouet (JS, pas scrapable)", "enabled": false, "url": "https://www.king-jouet.com/jeux-jouets-pokemon.htm"},
+    {"type": "listing", "name": "Exemple PrestaShop (sélecteurs manuels)", "enabled": false, "url": "https://exemple-boutique.fr/123-pokemon",
      "selectors": {"item": ".product-miniature", "title": ".product-title", "price": ".price", "link": ".product-title a"}}
   ],
-
   "watchlist_note": "Pages produit précises à suivre (prix + restock). JSON-LD. Amazon bloque → utilise Keepa.",
-  "watchlist": [
-  ]
+  "watchlist": []
 }
