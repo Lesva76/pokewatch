@@ -172,92 +172,265 @@ def build_embed(title, url, price, ptype, threshold, source, merchant=None, desc
     return e
 
 
-# ----------------------------------------------------------------------------- feeds
+# ----------------------------------------------------------------------------- sources
+def http_get(url, accept=None, params=None, allow_proxy=True):
+    h = dict(HEADERS)
+    if accept:
+        h["Accept"] = accept
+    r = requests.get(url, headers=h, params=params, timeout=25)
+    if r.status_code in (403, 429, 503) and allow_proxy:
+        log(f"[http] {url} → HTTP {r.status_code}, retry via proxy")
+        r = requests.get("https://api.allorigins.win/raw", params={"url": r.url}, timeout=35)
+    return r
+
+
 def fetch_feed(url):
     try:
-        r = requests.get(url, headers={**HEADERS, "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8"},
-                         timeout=25)
-        if r.status_code in (403, 429, 503):
-            # anti-bot (Cloudflare) sur l'IP GitHub → on retente via un proxy public
-            log(f"[feed] {url} → HTTP {r.status_code}, retry via proxy")
-            r = requests.get("https://api.allorigins.win/raw", params={"url": url}, timeout=30)
+        r = http_get(url, accept="application/rss+xml, application/xml;q=0.9, */*;q=0.8")
         if r.status_code != 200:
-            log(f"[feed] {url} → HTTP {r.status_code}")
+            log(f"[rss] {url} → HTTP {r.status_code}")
             return []
         fp = feedparser.parse(r.content)
         if fp.bozo and not fp.entries:
-            log(f"[feed] {url} → parse KO ({fp.bozo_exception})")
+            log(f"[rss] {url} → parse KO ({fp.bozo_exception})")
             return []
-        log(f"[feed] {url} → {len(fp.entries)} items")
+        log(f"[rss] {url} → {len(fp.entries)} items")
         return fp.entries
     except Exception as e:
-        log(f"[feed] {url} → erreur {e}")
+        log(f"[rss] {url} → erreur {e}")
         return []
 
 
 def entry_extra(entry, key_part):
-    """Récupère un champ namespacé type pepper:price / pepper:merchant, quel que soit le préfixe."""
+    """Champ namespacé (pepper:price / pepper:merchant...) quel que soit le préfixe."""
     for k, v in entry.items():
         if key_part in k.lower() and isinstance(v, str) and v.strip():
             return v.strip()
     return None
 
 
-def process_feeds(cfg, state, warmup):
-    alerts = []
-    feeds = list(cfg.get("feeds", [])) + EXTRA_FEEDS
-    seen = state.setdefault("seen", {})
-    must = cfg.get("must_match", [])
-    excl = cfg.get("exclude", [])
+def evaluate(cfg, title, price):
+    """→ (ptype, threshold, verdict) ou None si pas d'alerte."""
+    ptype = detect_type(title)
     maxp = cfg.get("max_price", {})
+    if ptype:
+        thr = maxp.get(ptype)
+        if price is None:
+            return (ptype, thr, "check") if cfg.get("alert_if_price_unknown", True) else None
+        if thr is not None and price <= thr:
+            return (ptype, thr, "deal")
+        return None
+    if cfg.get("alert_untyped_pokemon_deals", False):
+        return (None, None, "check")
+    return None
 
-    for url in feeds:
-        for e in fetch_feed(url):
-            title = norm(e.get("title", ""))
-            link = e.get("link", "") or ""
-            desc = strip_html(e.get("summary", "") or e.get("description", ""))
-            iid = item_id(link or title)
-            if iid in seen:
+
+def is_relevant(cfg, title, blob=None):
+    return matches_any(cfg.get("must_match", []), blob or title) and not matches_any(cfg.get("exclude", []), title)
+
+
+# --- RSS (Dealabs & co) : items nouveaux uniquement
+def src_rss(cfg, src, state, warmup):
+    alerts = []
+    seen = state.setdefault("seen", {})
+    for e in fetch_feed(src["url"]):
+        title = norm(e.get("title", ""))
+        link = e.get("link", "") or ""
+        desc = strip_html(e.get("summary", "") or e.get("description", ""))
+        iid = item_id(link or title)
+        if iid in seen:
+            continue
+        seen[iid] = now_iso()
+        if warmup or not is_relevant(cfg, title, f"{title} {desc}"):
+            continue
+        price = parse_price(title)
+        if price is None:
+            p2 = entry_extra(e, "price")
+            price = parse_price(p2) if p2 else parse_price(desc)
+        ev = evaluate(cfg, title if detect_type(title) else f"{title} {desc}", price)
+        if not ev:
+            log(f"[skip] {src['name']}: {title} ({price})")
+            continue
+        ptype, thr, verdict = ev
+        alerts.append(build_embed(title, link, price, ptype, thr, src["name"], entry_extra(e, "merchant"), desc, verdict))
+    return alerts
+
+
+# --- Catalogue suivi (Shopify / listing) : nouveau produit, baisse de prix, restock
+def track_products(cfg, src, state, warmup, products):
+    """products: liste de dict(key, title, price, link, available). Gère l'état & décide des alertes."""
+    alerts = []
+    cat = state.setdefault("catalog", {}).setdefault(src["name"], {})
+    restock_ok = cfg.get("alert_restock", True)
+    for p in products:
+        title = p["title"]
+        if not is_relevant(cfg, title):
+            continue
+        prev = cat.get(p["key"])
+        cat[p["key"]] = {"price": p["price"], "available": p["available"], "seen": now_iso(),
+                         "alerted": (prev or {}).get("alerted")}
+        if warmup:
+            continue
+        if not p["available"]:
+            continue
+        ev = evaluate(cfg, title, p["price"])
+        if not ev:
+            continue
+        ptype, thr, verdict = ev
+        reason = None
+        if prev is None:
+            reason = "🆕 nouveau"
+        elif prev.get("price") is not None and p["price"] is not None and p["price"] < prev["price"] - 0.009:
+            reason = f"📉 baisse ({prev['price']:.2f} → {p['price']:.2f} €)"
+        elif restock_ok and prev.get("available") is False:
+            reason = "📦 restock"
+        if not reason:
+            continue
+        if cat[p["key"]]["alerted"] == p["price"] and reason == "🆕 nouveau":
+            continue
+        cat[p["key"]]["alerted"] = p["price"]
+        alerts.append(build_embed(title, p["link"], p["price"], ptype, thr, src["name"], None, reason, verdict))
+    # purge produits disparus depuis 60 j
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=60)).isoformat()
+    for k in [k for k, v in cat.items() if v.get("seen", "") < cutoff]:
+        cat.pop(k)
+    return alerts
+
+
+def src_shopify(cfg, src, state, warmup):
+    base = src["url"].rstrip("/")
+    path = src.get("path", "/products.json")
+    products, page = [], 1
+    try:
+        while page <= 4:
+            r = http_get(f"{base}{path}", accept="application/json", params={"limit": 250, "page": page})
+            if r.status_code != 200:
+                log(f"[shopify] {src['name']} → HTTP {r.status_code}")
+                break
+            data = r.json().get("products", [])
+            if not data:
+                break
+            for pr in data:
+                variants = pr.get("variants") or []
+                prices = [float(v["price"]) for v in variants if v.get("price")]
+                avail = any(v.get("available", True) for v in variants) if variants else True
+                products.append({"key": str(pr.get("id")), "title": norm(pr.get("title", "")),
+                                 "price": min(prices) if prices else None,
+                                 "link": f"{base}/products/{pr.get('handle')}", "available": avail})
+            if len(data) < 250:
+                break
+            page += 1
+    except Exception as e:
+        log(f"[shopify] {src['name']} → erreur {e}")
+        return []
+    log(f"[shopify] {src['name']} → {len(products)} produits")
+    return track_products(cfg, src, state, warmup, products)
+
+
+def listing_from_jsonld(soup, base):
+    out = []
+    for s in soup.find_all("script", type="application/ld+json"):
+        try:
+            data = json.loads(s.string or "")
+        except Exception:
+            continue
+        stack = data if isinstance(data, list) else [data]
+        while stack:
+            d = stack.pop()
+            if isinstance(d, list):
+                stack.extend(d)
                 continue
-            seen[iid] = now_iso()
-            if warmup:
+            if not isinstance(d, dict):
                 continue
+            if "@graph" in d:
+                stack.extend(d["@graph"])
+            if d.get("@type") == "ItemList":
+                for el in d.get("itemListElement", []):
+                    it = el.get("item", el) if isinstance(el, dict) else None
+                    if isinstance(it, dict):
+                        stack.append(it)
+            t = d.get("@type")
+            if t == "Product" or (isinstance(t, list) and "Product" in t):
+                offers = d.get("offers") or {}
+                offers = offers if isinstance(offers, list) else [offers]
+                price, avail = None, True
+                for o in offers:
+                    if isinstance(o, dict):
+                        pv = o.get("price") or o.get("lowPrice")
+                        try:
+                            pv = float(str(pv).replace(",", ".")) if pv is not None else None
+                        except ValueError:
+                            pv = None
+                        if pv is not None:
+                            price = pv if price is None else min(price, pv)
+                        av = str(o.get("availability", "")).lower()
+                        if "outofstock" in av or "soldout" in av:
+                            avail = False
+                link = d.get("url") or d.get("@id") or ""
+                if link and not link.startswith("http"):
+                    link = base + link
+                name = norm(d.get("name", ""))
+                if name:
+                    out.append({"key": link or name, "title": name, "price": price, "link": link or base, "available": avail})
+    return out
 
-            blob = f"{title} {desc}"
-            if not matches_any(must, blob):
-                continue
-            if matches_any(excl, title):
-                log(f"[skip-exclude] {title}")
-                continue
 
-            ptype = detect_type(title) or detect_type(desc)
-            price = parse_price(title)
-            if price is None:
-                p2 = entry_extra(e, "price")
-                price = parse_price(p2) if p2 else None
-            if price is None:
-                price = parse_price(desc)
-            merchant = entry_extra(e, "merchant")
+def listing_from_selectors(soup, base, sel):
+    out = []
+    for card in soup.select(sel["item"]):
+        t = card.select_one(sel["title"])
+        if not t:
+            continue
+        title = norm(t.get_text())
+        pr = card.select_one(sel.get("price", ".price"))
+        price = parse_price(pr.get_text() + " €") if pr else None
+        a = card.select_one(sel.get("link", "a"))
+        link = (a.get("href") if a else "") or ""
+        if link and not link.startswith("http"):
+            link = base + ("" if link.startswith("/") else "/") + link
+        avail = not re.search(r"rupture|indisponible|[ée]puis[ée]|sold out", card.get_text(" ").lower())
+        out.append({"key": link or title, "title": title, "price": price, "link": link or base, "available": avail})
+    return out
 
-            if ptype:
-                thr = maxp.get(ptype)
-                if price is None:
-                    if not cfg.get("alert_if_price_unknown", True):
-                        continue
-                    verdict = "check"
-                elif thr is not None and price <= thr:
-                    verdict = "deal"
-                else:
-                    log(f"[skip-price] {title} ({price}€ > {thr}€)")
-                    continue
-            else:
-                if not cfg.get("alert_untyped_pokemon_deals", False):
-                    log(f"[skip-untyped] {title}")
-                    continue
-                thr, verdict = None, "check"
 
-            src = "Dealabs" if "dealabs" in url else re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
-            alerts.append(build_embed(title, link, price, ptype, thr, src, merchant, desc, verdict))
+def src_listing(cfg, src, state, warmup):
+    url = src["url"]
+    base = re.match(r"https?://[^/]+", url).group(0)
+    try:
+        r = http_get(url)
+        if r.status_code != 200:
+            log(f"[listing] {src['name']} → HTTP {r.status_code}")
+            return []
+        soup = BeautifulSoup(r.text, "lxml")
+    except Exception as e:
+        log(f"[listing] {src['name']} → erreur {e}")
+        return []
+    products = listing_from_jsonld(soup, base)
+    if not products and src.get("selectors"):
+        products = listing_from_selectors(soup, base, src["selectors"])
+    log(f"[listing] {src['name']} → {len(products)} produits")
+    if not products:
+        return []
+    return track_products(cfg, src, state, warmup, products)
+
+
+SOURCE_HANDLERS = {"rss": src_rss, "shopify": src_shopify, "listing": src_listing}
+
+
+def process_sources(cfg, state, warmup):
+    alerts = []
+    sources = [s for s in cfg.get("sources", []) if s.get("enabled", True)]
+    for u in EXTRA_FEEDS:
+        sources.append({"type": "rss", "name": "Dealabs alertes perso" if "dealabs" in u else "RSS perso", "url": u})
+    for src in sources:
+        h = SOURCE_HANDLERS.get(src.get("type"))
+        if not h:
+            log(f"[src] type inconnu: {src}")
+            continue
+        try:
+            alerts += h(cfg, src, state, warmup)
+        except Exception as e:
+            log(f"[src] {src.get('name')} → erreur {e}")
     return alerts
 
 
@@ -338,12 +511,15 @@ def process_watchlist(cfg, state):
         st.update({"last_price": price, "available": available, "checked": now_iso()})
         log(f"[watch] {name} → {price} € dispo={available}")
         if price is None or not available:
+            st["was_available"] = available
             continue
-        if price <= float(mx) and st.get("alerted_price") != price:
+        restock = st.get("was_available") is False and cfg.get("alert_restock", True)
+        st["was_available"] = available
+        if price <= float(mx) and (st.get("alerted_price") != price or restock):
             st["alerted_price"] = price
             merchant = re.sub(r"^https?://(www\.)?", "", url).split("/")[0]
             alerts.append(build_embed(name, url, price, item.get("type"), float(mx), "Watchlist", merchant,
-                                      verdict="watch"))
+                                      "📦 restock" if restock else None, verdict="watch"))
         elif price > float(mx):
             st.pop("alerted_price", None)  # ré-alerte si ça rebaisse plus tard
     return alerts
@@ -361,11 +537,13 @@ def main():
     for k in [k for k, ts in seen.items() if datetime.fromisoformat(ts) < cutoff]:
         seen.pop(k, None)
 
-    alerts = process_feeds(cfg, state, warmup)
+    alerts = process_sources(cfg, state, warmup)
     alerts += process_watchlist(cfg, state)
 
     if warmup:
-        discord(content=f"✅ PokéWatch actif — {len(seen)} deals existants ignorés, j'alerte sur les nouveaux à partir de maintenant.")
+        ncat = sum(len(v) for v in state.get("catalog", {}).values())
+        discord(content=f"✅ PokéWatch actif — {len(seen)} deals Dealabs et {ncat} produits boutiques indexés. "
+                        "J'alerte sur les nouveautés, baisses de prix et restocks à partir de maintenant.")
 
     sent = 0
     for emb in alerts[:MAX_ALERTS_PER_RUN]:
