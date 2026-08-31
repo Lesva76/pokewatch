@@ -1,0 +1,36 @@
+{
+  "_note": "Prix max (en €) au-dessus desquels on n'alerte PAS. Ajuste à ta sauce. Détection du type via mots-clés du titre.",
+
+  "feeds": [
+    "https://www.dealabs.com/rss/nouveaux",
+    "https://www.dealabs.com/rss/hot"
+  ],
+
+  "must_match": ["pok[eé]mon", "pkmn", "\\btcg\\b", "jcc pok"],
+
+  "exclude": [
+    "peluche", "figurine", "funko", "lego", "mega construx", "sac [àa] dos", "classeur", "portfolio",
+    "sleeves", "prot[èe]ge[- ]cartes", "playmat", "tapis de jeu", "deck box", "\\bswitch\\b", "jeu vid[ée]o",
+    "manette", "console", "amiibo", "t-shirt", "pyjama", "gourde", "trousse", "cahier", "agenda",
+    "lot de \\d+ cartes", "carte [àa] l.unit[ée]", "single", "psa \\d", "grad[ée]e"
+  ],
+
+  "max_price": {
+    "display":      139.0,
+    "demi_display":  75.0,
+    "etb":           44.9,
+    "bundle":        26.0,
+    "tripack":       13.5,
+    "coffret":       24.9,
+    "tin":           18.0,
+    "blister":        6.0,
+    "booster":        4.9
+  },
+
+  "alert_if_price_unknown": true,
+  "alert_untyped_pokemon_deals": false,
+
+  "watchlist_note": "Pages produit à surveiller en direct (Fnac, Cultura, Cdiscount, Leclerc, King Jouet, JouéClub, Micromania...). Prix lu via JSON-LD. Certains sites bloquent (Amazon = quasi toujours), c'est best-effort.",
+  "watchlist": [
+  ]
+}
