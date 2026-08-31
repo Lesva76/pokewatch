@@ -262,6 +262,9 @@ def track_products(cfg, src, state, warmup, products):
     alerts = []
     cat = state.setdefault("catalog", {}).setdefault(src["name"], {})
     restock_ok = cfg.get("alert_restock", True)
+    if not cat:  # première indexation de cette source → on n'alerte pas sur l'existant
+        warmup = True
+        log(f"[catalog] {src['name']} : première indexation, pas d'alerte")
     for p in products:
         title = p["title"]
         if not is_relevant(cfg, title):
