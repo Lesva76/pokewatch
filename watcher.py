@@ -17,8 +17,8 @@ import requests
 from bs4 import BeautifulSoup
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(ROOT, "config.json")
-STATE_PATH = os.path.join(ROOT, "state.json")
+CONFIG_PATH = os.environ.get("POKEWATCH_CONFIG") or os.path.join(ROOT, "config.json")
+STATE_PATH = os.environ.get("POKEWATCH_STATE") or os.path.join(ROOT, "state.json")
 
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
 EXTRA_FEEDS = [u.strip() for u in os.environ.get("EXTRA_FEEDS", "").split(",") if u.strip()]
