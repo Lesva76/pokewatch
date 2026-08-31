@@ -14,3 +14,5 @@ et un indice « Potentiel » /5 expliqué (rareté, momentum, âge du set, popul
 5. Inviter le bot : OAuth2 → URL Generator → scope `applications.commands` → ouvrir l'URL → choisir le serveur.
 
 Données : [TCGdex](https://tcgdex.dev) (gratuit, sans clé, noms FR, Cardmarket maj quotidienne).
+
+Worker : https://pokewatch-carte.alexis-valles76290.workers.dev (déployé automatiquement par Cloudflare Workers Builds à chaque commit dans `discord-carte/`).
