@@ -14,6 +14,7 @@ export default {
     const url = new URL(req.url);
     if (url.pathname === "/register") return registerCommands(env);
     if (url.pathname === "/health") return new Response("ok");
+    if (url.pathname === "/debug") return debug(env);
     if (req.method !== "POST") return new Response("PokéWatch /carte — en ligne");
 
     const body = await req.text();
@@ -37,14 +38,31 @@ export default {
 };
 
 // ------------------------------------------------------------------ Discord plumbing
+async function importEd25519(pubKeyHex) {
+  try {
+    return [await crypto.subtle.importKey("raw", hex(pubKeyHex), { name: "Ed25519" }, false, ["verify"]), { name: "Ed25519" }];
+  } catch {
+    const alg = { name: "NODE-ED25519", namedCurve: "NODE-ED25519" };
+    return [await crypto.subtle.importKey("raw", hex(pubKeyHex), alg, false, ["verify"]), alg];
+  }
+}
+
 async function verify(req, body, pubKeyHex) {
   const sig = req.headers.get("x-signature-ed25519");
   const ts = req.headers.get("x-signature-timestamp");
   if (!sig || !ts || !pubKeyHex) return false;
   try {
-    const key = await crypto.subtle.importKey("raw", hex(pubKeyHex), { name: "Ed25519" }, false, ["verify"]);
-    return await crypto.subtle.verify("Ed25519", key, hex(sig), new TextEncoder().encode(ts + body));
+    const [key, alg] = await importEd25519(pubKeyHex);
+    return await crypto.subtle.verify(alg, key, hex(sig), new TextEncoder().encode(ts + body));
   } catch { return false; }
+}
+
+async function debug(env) {
+  const out = { app_id: !!env.DISCORD_APPLICATION_ID, public_key: !!env.DISCORD_PUBLIC_KEY, token: !!env.DISCORD_TOKEN };
+  try { const [, alg] = await importEd25519(env.DISCORD_PUBLIC_KEY || "00".repeat(32)); out.ed25519 = alg.name; }
+  catch (e) { out.ed25519 = "KO: " + e.message; }
+  try { const r = await fetch(`${TCGDEX}/sets`); out.tcgdex = r.status; } catch (e) { out.tcgdex = "KO: " + e.message; }
+  return json(out);
 }
 const hex = h => new Uint8Array(h.match(/.{1,2}/g).map(b => parseInt(b, 16)));
 const json = o => new Response(JSON.stringify(o), { headers: { "content-type": "application/json" } });
