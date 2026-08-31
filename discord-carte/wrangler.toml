@@ -1,5 +1,9 @@
 name = "pokewatch-carte"
 main = "worker.js"
 compatibility_date = "2026-08-01"
-# Secrets (Cloudflare → Worker → Settings → Variables and Secrets) :
-#   DISCORD_PUBLIC_KEY, DISCORD_APPLICATION_ID, DISCORD_TOKEN
+
+[vars]
+DISCORD_APPLICATION_ID = "1543952959749099632"
+DISCORD_PUBLIC_KEY = "db90d2daccc13c02afd6180c7aeb2436a563233677843ce4055644b3fdc9aabf"
+
+# Secret (Cloudflare → Worker → Settings → Variables and Secrets, type Secret) : DISCORD_TOKEN
