@@ -8,7 +8,7 @@ const T = { PING: 1, CMD: 2, COMPONENT: 3, AUTOCOMPLETE: 4 };
 const R = { PONG: 1, MSG: 4, DEFER: 5, DEFER_UPDATE: 6, UPDATE: 7, CHOICES: 8 };
 const PER = 25; // cartes par page (max Discord pour un menu déroulant)
 
-let SETS = null, SETS_AT = 0; // cache set id → {name, releaseDate}
+let SETS = null, SETS_AT = 0; // cache set id → {name, cardCount, rank}
 
 export default {
   async fetch(req, env, ctx) {
@@ -132,26 +132,28 @@ function parseQuery(q) {
   return { name: norm(q), num: "" };
 }
 
+// L'API ne renvoie pas releaseDate dans la liste : on la trie côté serveur (plus récent d'abord)
+// et on garde le rang comme indice de fraîcheur (rank 0 = dernière sortie).
 async function getSets() {
   if (SETS && Date.now() - SETS_AT < 6 * 3600e3) return SETS;
-  const list = await fetch(`${TCGDEX}/sets`).then(r => r.ok ? r.json() : []);
+  const list = await fetch(`${TCGDEX}/sets?sort:field=releaseDate&sort:order=DESC`).then(r => r.ok ? r.json() : []);
   if (list.length) {
-    SETS = Object.fromEntries(list.map(s => [s.id, { name: s.name, releaseDate: s.releaseDate, cardCount: s.cardCount }]));
+    SETS = Object.fromEntries(list.map((s, i) => [s.id, { name: s.name, cardCount: s.cardCount, rank: i }]));
     SETS_AT = Date.now();
   }
   return SETS || {};
 }
 
-// libellé « Dracaufeu-ex — n°125 · Flammes Obsidiennes (2023) », tronqué à 100 caractères
+// libellé « Dracaufeu-ex — n°125 · Flammes Obsidiennes », tronqué à 100 caractères
 function cardLabel(c, sets) {
   const s = sets[c.id.split("-")[0]] || {};
-  const yr = s.releaseDate ? ` (${s.releaseDate.slice(0, 4)})` : "";
   const head = `${c.name} — n°${c.localId} · `;
   let sn = s.name || c.id.split("-")[0];
-  if ((head + sn + yr).length > 100) sn = sn.slice(0, Math.max(3, 100 - head.length - yr.length - 1)) + "…";
-  return (head + sn + yr).slice(0, 100);
+  if ((head + sn).length > 100) sn = sn.slice(0, Math.max(3, 99 - head.length)) + "…";
+  return (head + sn).slice(0, 100);
 }
-const setDate = (c, sets) => (sets[c.id.split("-")[0]] || {}).releaseDate || "0000-00-00";
+// rang du set : 0 = sortie la plus récente
+const setRank = (c, sets) => { const s = sets[c.id.split("-")[0]]; return s && s.rank != null ? s.rank : 99999; };
 
 // ------------------------------------------------------------------ recherche large (on remplit les 25 choix Discord)
 const QCACHE = new Map(); // terme → cartes (cache mémoire du worker)
@@ -213,14 +215,13 @@ async function autocomplete(input) {
     let [hits, sets] = await Promise.all([searchCards(name), getSets()]);
     if (hits.length < 25) hits = await searchCards(name, true); // 2e passe, cache → quasi gratuit
 
-    const date = c => (sets[c.id.split("-")[0]] || {}).releaseDate || "0000-00-00";
     const rank = c => {
       const n = norm(c.name);
       let s = n === name ? 4 : n.startsWith(name) ? 3 : n.includes(name) ? 2 : 1;
       if (num) { const ln = numOf(c.localId); s += ln === num ? 20 : ln.startsWith(num) ? 10 : 0; }
       return s;
     };
-    const out = hits.sort((a, b) => rank(b) - rank(a) || date(b).localeCompare(date(a))).slice(0, 25);
+    const out = hits.sort((a, b) => rank(b) - rank(a) || setRank(a, sets) - setRank(b, sets)).slice(0, 25);
 
     return out.map(x => ({ name: cardLabel(x, sets), value: `id:${x.id}` }));
   } catch { return []; }
@@ -232,9 +233,9 @@ async function autocompleteSet(input) {
   const q = norm(input);
   let list = Object.entries(sets).map(([id, s]) => ({ id, ...s }));
   if (q.length >= 2) list = list.filter(s => norm(s.name).includes(q) || norm(s.id).includes(q));
-  list.sort((a, b) => (b.releaseDate || "").localeCompare(a.releaseDate || ""));
+  list.sort((a, b) => a.rank - b.rank); // dernières sorties en premier
   return list.slice(0, 25).map(s => ({
-    name: `${s.name}${s.releaseDate ? " (" + s.releaseDate.slice(0, 4) + ")" : ""}${s.cardCount?.total ? " · " + s.cardCount.total + " cartes" : ""}`.slice(0, 100),
+    name: `${s.name}${s.cardCount?.total ? " · " + s.cardCount.total + " cartes" : ""}`.slice(0, 100),
     value: `sid:${s.id}`,
   }));
 }
@@ -250,7 +251,7 @@ async function cardsFor(kind, key, sets) {
     return { cards, title: `${set?.name || key} — ${cards.length} cartes` };
   }
   const cards = await searchCards(norm(key), true);
-  cards.sort((a, b) => setDate(b, sets).localeCompare(setDate(a, sets)));
+  cards.sort((a, b) => setRank(a, sets) - setRank(b, sets));
   return { cards, title: `${cards.length} cartes pour « ${key} »` };
 }
 
@@ -276,7 +277,7 @@ async function browsePayload(kind, key, page) {
     return {
       label: `${c.name} — n°${c.localId}`.slice(0, 100),
       value: `id:${c.id}`,
-      description: `${s.name || c.id.split("-")[0]}${s.releaseDate ? " · " + s.releaseDate.slice(0, 4) : ""}`.slice(0, 100),
+      description: `${s.name || c.id.split("-")[0]}`.slice(0, 100),
     };
   });
   return {
@@ -310,8 +311,7 @@ async function handleSet(opts, it, env) {
     if (!id) {
       const sets = await getSets();
       const q = norm(raw);
-      const list = Object.entries(sets).map(([sid, s]) => ({ sid, ...s }))
-        .sort((a, b) => (b.releaseDate || "").localeCompare(a.releaseDate || ""));
+      const list = Object.entries(sets).map(([sid, s]) => ({ sid, ...s })).sort((a, b) => a.rank - b.rank);
       id = (q ? list.find(s => norm(s.name).includes(q)) : list[0])?.sid;
       if (!id) return followup(it, env, { content: `❌ Set introuvable pour **${raw}**. Utilise l'autocomplétion.` });
     }
