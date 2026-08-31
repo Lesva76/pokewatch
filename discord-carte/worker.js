@@ -4,10 +4,11 @@
 //    "Interactions Endpoint URL" de l'app Discord (Developer Portal).
 
 const TCGDEX = "https://api.tcgdex.net/v2/fr";
-const T = { PING: 1, CMD: 2, AUTOCOMPLETE: 4 };
-const R = { PONG: 1, MSG: 4, DEFER: 5, CHOICES: 8 };
+const T = { PING: 1, CMD: 2, COMPONENT: 3, AUTOCOMPLETE: 4 };
+const R = { PONG: 1, MSG: 4, DEFER: 5, DEFER_UPDATE: 6, UPDATE: 7, CHOICES: 8 };
+const PER = 25; // cartes par page (max Discord pour un menu déroulant)
 
-let SETS = null; // cache set id → {name, releaseDate}
+let SETS = null, SETS_AT = 0; // cache set id → {name, releaseDate}
 
 export default {
   async fetch(req, env, ctx) {
@@ -23,15 +24,36 @@ export default {
 
     if (it.type === T.PING) return json({ type: R.PONG });
 
-    if (it.type === T.AUTOCOMPLETE && it.data?.name === "carte") {
+    if (it.type === T.AUTOCOMPLETE) {
       const focused = (it.data.options || []).find(o => o.focused);
-      return json({ type: R.CHOICES, data: { choices: await autocomplete(focused?.value || "") } });
+      const v = focused?.value || "";
+      const choices = it.data?.name === "set" ? await autocompleteSet(v) : await autocomplete(v);
+      return json({ type: R.CHOICES, data: { choices } });
     }
 
     if (it.type === T.CMD && it.data?.name === "carte") {
       const opts = Object.fromEntries((it.data.options || []).map(o => [o.name, o.value]));
       ctx.waitUntil(handleCarte(opts, it, env));
       return json({ type: R.DEFER });
+    }
+
+    if (it.type === T.CMD && it.data?.name === "set") {
+      const opts = Object.fromEntries((it.data.options || []).map(o => [o.name, o.value]));
+      ctx.waitUntil(handleSet(opts, it, env));
+      return json({ type: R.DEFER });
+    }
+
+    if (it.type === T.COMPONENT) {
+      const cid = it.data?.custom_id || "";
+      if (cid === "pick") { // une carte choisie dans le menu → fiche complète en nouveau message
+        ctx.waitUntil(handleCarte({ carte: it.data.values[0] }, it, env));
+        return json({ type: R.DEFER });
+      }
+      if (cid.startsWith("pg|")) { // page précédente / suivante
+        ctx.waitUntil(turnPage(cid, it, env));
+        return json({ type: R.DEFER_UPDATE });
+      }
+      return json({ type: R.DEFER_UPDATE });
     }
     return json({ type: R.MSG, data: { content: "Commande inconnue", flags: 64 } });
   },
@@ -75,16 +97,25 @@ async function followup(it, env, payload) {
 
 async function registerCommands(env) {
   if (!env.DISCORD_TOKEN || !env.DISCORD_APPLICATION_ID) return new Response("DISCORD_TOKEN / DISCORD_APPLICATION_ID manquants", { status: 500 });
-  const cmd = {
-    name: "carte", description: "Prix actuel + potentiel d'une carte Pokémon (Cardmarket)",
-    options: [
-      { name: "carte", type: 3, required: true, autocomplete: true,
-        description: "Nom + numéro (ex: Dracaufeu ex 125) — l'autocomplétion propose les cartes" },
-    ],
-  };
+  const cmds = [
+    {
+      name: "carte", description: "Prix actuel + potentiel d'une carte Pokémon (Cardmarket)",
+      options: [
+        { name: "carte", type: 3, required: true, autocomplete: true,
+          description: "Nom + numéro (ex: Dracaufeu ex 125) — l'autocomplétion propose les cartes" },
+      ],
+    },
+    {
+      name: "set", description: "Parcourir toutes les cartes d'un set (les plus récents en premier)",
+      options: [
+        { name: "set", type: 3, required: false, autocomplete: true,
+          description: "Nom du set — laisse vide pour les dernières sorties" },
+      ],
+    },
+  ];
   const r = await fetch(`https://discord.com/api/v10/applications/${env.DISCORD_APPLICATION_ID}/commands`, {
     method: "PUT", headers: { "content-type": "application/json", authorization: `Bot ${env.DISCORD_TOKEN}` },
-    body: JSON.stringify([cmd]),
+    body: JSON.stringify(cmds),
   });
   return new Response(`register → ${r.status}\n${await r.text()}`);
 }
@@ -102,11 +133,25 @@ function parseQuery(q) {
 }
 
 async function getSets() {
-  if (SETS) return SETS;
+  if (SETS && Date.now() - SETS_AT < 6 * 3600e3) return SETS;
   const list = await fetch(`${TCGDEX}/sets`).then(r => r.ok ? r.json() : []);
-  SETS = Object.fromEntries(list.map(s => [s.id, { name: s.name, releaseDate: s.releaseDate }]));
-  return SETS;
+  if (list.length) {
+    SETS = Object.fromEntries(list.map(s => [s.id, { name: s.name, releaseDate: s.releaseDate, cardCount: s.cardCount }]));
+    SETS_AT = Date.now();
+  }
+  return SETS || {};
 }
+
+// libellé « Dracaufeu-ex — n°125 · Flammes Obsidiennes (2023) », tronqué à 100 caractères
+function cardLabel(c, sets) {
+  const s = sets[c.id.split("-")[0]] || {};
+  const yr = s.releaseDate ? ` (${s.releaseDate.slice(0, 4)})` : "";
+  const head = `${c.name} — n°${c.localId} · `;
+  let sn = s.name || c.id.split("-")[0];
+  if ((head + sn + yr).length > 100) sn = sn.slice(0, Math.max(3, 100 - head.length - yr.length - 1)) + "…";
+  return (head + sn + yr).slice(0, 100);
+}
+const setDate = (c, sets) => (sets[c.id.split("-")[0]] || {}).releaseDate || "0000-00-00";
 
 // ------------------------------------------------------------------ recherche large (on remplit les 25 choix Discord)
 const QCACHE = new Map(); // terme → cartes (cache mémoire du worker)
@@ -177,15 +222,103 @@ async function autocomplete(input) {
     };
     const out = hits.sort((a, b) => rank(b) - rank(a) || date(b).localeCompare(date(a))).slice(0, 25);
 
-    return out.map(x => {
-      const setId = x.id.split("-")[0], s = sets[setId] || {};
-      const yr = s.releaseDate ? ` (${s.releaseDate.slice(0, 4)})` : "";
-      const head = `${x.name} — n°${x.localId} · `;
-      let sn = s.name || setId;
-      if ((head + sn + yr).length > 100) sn = sn.slice(0, Math.max(3, 100 - head.length - yr.length - 1)) + "…";
-      return { name: (head + sn + yr).slice(0, 100), value: `id:${x.id}` };
-    });
+    return out.map(x => ({ name: cardLabel(x, sets), value: `id:${x.id}` }));
   } catch { return []; }
+}
+
+// ------------------------------------------------------------------ sets : autocomplétion + navigateur paginé
+async function autocompleteSet(input) {
+  const sets = await getSets();
+  const q = norm(input);
+  let list = Object.entries(sets).map(([id, s]) => ({ id, ...s }));
+  if (q.length >= 2) list = list.filter(s => norm(s.name).includes(q) || norm(s.id).includes(q));
+  list.sort((a, b) => (b.releaseDate || "").localeCompare(a.releaseDate || ""));
+  return list.slice(0, 25).map(s => ({
+    name: `${s.name}${s.releaseDate ? " (" + s.releaseDate.slice(0, 4) + ")" : ""}${s.cardCount?.total ? " · " + s.cardCount.total + " cartes" : ""}`.slice(0, 100),
+    value: `sid:${s.id}`,
+  }));
+}
+
+// kind "n" = recherche par nom, "s" = set entier. key est encodé pour tenir dans custom_id (100 car.)
+async function cardsFor(kind, key, sets) {
+  if (kind === "s") {
+    const set = await fetch(`${TCGDEX}/sets/${key}`).then(r => r.ok ? r.json() : null);
+    const cards = (set?.cards || []).slice().sort((a, b) => {
+      const na = parseInt(a.localId, 10), nb = parseInt(b.localId, 10);
+      return (isNaN(na) ? 1e9 : na) - (isNaN(nb) ? 1e9 : nb);
+    });
+    return { cards, title: `${set?.name || key} — ${cards.length} cartes` };
+  }
+  const cards = await searchCards(norm(key), true);
+  cards.sort((a, b) => setDate(b, sets).localeCompare(setDate(a, sets)));
+  return { cards, title: `${cards.length} cartes pour « ${key} »` };
+}
+
+async function browsePayload(kind, key, page) {
+  const sets = await getSets();
+  const { cards, title } = await cardsFor(kind, key, sets);
+  if (!cards.length) return { content: `❌ Rien trouvé pour **${key}**.`, embeds: [], components: [] };
+
+  const pages = Math.max(1, Math.ceil(cards.length / PER));
+  page = Math.max(0, Math.min(page, pages - 1));
+  const slice = cards.slice(page * PER, page * PER + PER);
+
+  const lines = slice.map((c, i) => `\`${String(page * PER + i + 1).padStart(3)}\` ${cardLabel(c, sets)}`).join("\n");
+  const k = encodeURIComponent(String(key)).slice(0, 80);
+  const embed = {
+    title: title.slice(0, 250),
+    description: lines.slice(0, 4000),
+    color: 0x5865F2,
+    footer: { text: `Page ${page + 1}/${pages} · choisis une carte dans le menu pour voir son prix` },
+  };
+  const options = slice.map(c => {
+    const s = sets[c.id.split("-")[0]] || {};
+    return {
+      label: `${c.name} — n°${c.localId}`.slice(0, 100),
+      value: `id:${c.id}`,
+      description: `${s.name || c.id.split("-")[0]}${s.releaseDate ? " · " + s.releaseDate.slice(0, 4) : ""}`.slice(0, 100),
+    };
+  });
+  return {
+    content: "",
+    embeds: [embed],
+    components: [
+      { type: 1, components: [{ type: 3, custom_id: "pick", placeholder: "Voir le prix d'une carte…", options }] },
+      { type: 1, components: [
+        { type: 2, style: 2, label: "◀", custom_id: `pg|${kind}|${page - 1}|${k}`, disabled: page === 0 },
+        { type: 2, style: 2, label: `Page ${page + 1}/${pages}`, custom_id: "noop", disabled: true },
+        { type: 2, style: 2, label: "▶", custom_id: `pg|${kind}|${page + 1}|${k}`, disabled: page >= pages - 1 },
+      ] },
+    ],
+  };
+}
+
+async function turnPage(cid, it, env) {
+  try {
+    const [, kind, pageStr, ...rest] = cid.split("|");
+    const key = decodeURIComponent(rest.join("|"));
+    return followup(it, env, await browsePayload(kind, key, parseInt(pageStr, 10) || 0));
+  } catch (e) {
+    return followup(it, env, { content: `⚠️ Erreur : ${e.message}` });
+  }
+}
+
+async function handleSet(opts, it, env) {
+  try {
+    const raw = opts.set || "";
+    let id = raw.startsWith("sid:") ? raw.slice(4) : null;
+    if (!id) {
+      const sets = await getSets();
+      const q = norm(raw);
+      const list = Object.entries(sets).map(([sid, s]) => ({ sid, ...s }))
+        .sort((a, b) => (b.releaseDate || "").localeCompare(a.releaseDate || ""));
+      id = (q ? list.find(s => norm(s.name).includes(q)) : list[0])?.sid;
+      if (!id) return followup(it, env, { content: `❌ Set introuvable pour **${raw}**. Utilise l'autocomplétion.` });
+    }
+    return followup(it, env, await browsePayload("s", id, 0));
+  } catch (e) {
+    return followup(it, env, { content: `⚠️ Erreur : ${e.message}` });
+  }
 }
 
 const pct = (a, b) => (a && b) ? ((a - b) / b * 100) : null;
@@ -234,11 +367,7 @@ async function handleCarte(opts, it, env) {
       if (num) { const byNum = hits.filter(c => numOf(c.localId) === num); if (byNum.length) hits = byNum; }
       const exact = hits.filter(c => norm(c.name) === name); if (exact.length) hits = exact;
       if (!hits.length) return followup(it, env, { content: `❌ Aucune carte trouvée pour **${input}**. Essaie le nom FR + numéro, ex : \`Dracaufeu ex 125\`.` });
-      if (hits.length > 1) {
-        const sets = await getSets();
-        const lines = hits.slice(0, 20).map(c => `• **${c.name}** — n°${c.localId} · ${sets[c.id.split("-")[0]]?.name || c.id}`).join("\n");
-        return followup(it, env, { content: `🔎 ${hits.length} cartes correspondent — refais \`/carte\` en choisissant dans l'autocomplétion, ou ajoute le numéro :\n${lines}` });
-      }
+      if (hits.length > 1) return followup(it, env, await browsePayload("n", input, 0));
       cardId = hits[0].id;
     }
 
