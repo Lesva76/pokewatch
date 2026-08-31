@@ -1,0 +1,11 @@
+name = "pokewatch-cron"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+keep_vars = true
+
+[triggers]
+crons = ["* * * * *"]
+
+# KV à créer dans le dashboard (Storage & Databases → KV → Create → "pokewatch-state"),
+# puis Settings du worker → Bindings → KV namespace : variable STATE → pokewatch-state
+# Secret : DISCORD_WEBHOOK_URL
