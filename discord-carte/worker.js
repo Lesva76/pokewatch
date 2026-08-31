@@ -108,16 +108,56 @@ async function getSets() {
   return SETS;
 }
 
-async function searchCards(name) {
-  const q = name.split(" ")[0];
-  if (q.length < 2) return [];
-  const list = await fetch(`${TCGDEX}/cards?name=${encodeURIComponent(q)}`).then(r => r.ok ? r.json() : []);
-  const want = name;
-  let hits = list.filter(c => norm(c.name) === want);
-  if (!hits.length) hits = list.filter(c => norm(c.name).startsWith(want));
-  if (!hits.length) hits = list.filter(c => norm(c.name).includes(want) || want.includes(norm(c.name)));
-  if (!hits.length) hits = list;
-  return hits;
+// ------------------------------------------------------------------ recherche large (on remplit les 25 choix Discord)
+const QCACHE = new Map(); // terme → cartes (cache mémoire du worker)
+
+async function fetchByName(lang, term) {
+  const key = `${lang}:${term}`;
+  if (QCACHE.has(key)) return QCACHE.get(key);
+  let list = [];
+  try {
+    const r = await fetch(`https://api.tcgdex.net/v2/${lang}/cards?name=${encodeURIComponent(term)}`);
+    if (r.ok) list = await r.json();
+  } catch {}
+  if (QCACHE.size > 80) QCACHE.clear();
+  QCACHE.set(key, list);
+  return list;
+}
+
+// termes envoyés à l'API : mot le plus long, premier mot, préfixe (rattrape les fautes de frappe)
+const STOP = /^(ex|gx|v|vmax|vstar|de|la|le|du|des|et)$/;
+function terms(name) {
+  const words = name.split(" ").filter(w => w.length >= 2 && !STOP.test(w));
+  const bylen = words.slice().sort((a, b) => b.length - a.length);
+  const out = [];
+  for (const w of [bylen[0], name.split(" ")[0], bylen[0] && bylen[0].slice(0, 5), bylen[1]])
+    if (w && w.length >= 2 && !out.includes(w)) out.push(w);
+  return out.slice(0, 3);
+}
+
+// wide = on garde aussi les correspondances faibles + on interroge l'anglais
+async function searchCards(name, wide = false) {
+  const ts = terms(name);
+  if (!ts.length) return [];
+  const seen = new Map();
+  const add = list => { for (const c of list) if (c && c.id && !seen.has(c.id)) seen.set(c.id, c); };
+
+  add((await Promise.all(ts.map(t => fetchByName("fr", t)))).flat());
+  if (wide || seen.size < 25) add((await Promise.all(ts.map(t => fetchByName("en", t)))).flat());
+
+  const words = name.split(" ").filter(Boolean);
+  const scored = [...seen.values()].map(c => {
+    const n = norm(c.name);
+    let s = 10;
+    if (n === name) s = 100;
+    else if (n.startsWith(name)) s = 80;
+    else if (n.includes(name)) s = 65;
+    else if (words.length && words.every(w => n.includes(w))) s = 50;
+    else if (n.includes(ts[0])) s = 35;
+    else if (words.some(w => w.length >= 3 && n.includes(w))) s = 20;
+    return { c, s };
+  }).filter(x => wide || x.s > 10);
+  return scored.sort((a, b) => b.s - a.s).map(x => x.c);
 }
 
 async function autocomplete(input) {
@@ -125,14 +165,25 @@ async function autocomplete(input) {
     if (input.startsWith("id:")) return [];
     const { name, num } = parseQuery(input);
     if (name.length < 2) return [];
-    const [hits, sets] = await Promise.all([searchCards(name), getSets()]);
-    let c = hits;
-    if (num) c = c.filter(x => numOf(x.localId) === num).concat(c.filter(x => numOf(x.localId).startsWith(num) && numOf(x.localId) !== num));
-    c = c.slice().reverse().slice(0, 25); // récents en premier
-    return c.map(x => {
-      const setId = x.id.split("-")[0];
-      const label = `${x.name} — n°${x.localId} · ${sets[setId]?.name || setId}`;
-      return { name: label.slice(0, 100), value: `id:${x.id}` };
+    let [hits, sets] = await Promise.all([searchCards(name), getSets()]);
+    if (hits.length < 25) hits = await searchCards(name, true); // 2e passe, cache → quasi gratuit
+
+    const date = c => (sets[c.id.split("-")[0]] || {}).releaseDate || "0000-00-00";
+    const rank = c => {
+      const n = norm(c.name);
+      let s = n === name ? 4 : n.startsWith(name) ? 3 : n.includes(name) ? 2 : 1;
+      if (num) { const ln = numOf(c.localId); s += ln === num ? 20 : ln.startsWith(num) ? 10 : 0; }
+      return s;
+    };
+    const out = hits.sort((a, b) => rank(b) - rank(a) || date(b).localeCompare(date(a))).slice(0, 25);
+
+    return out.map(x => {
+      const setId = x.id.split("-")[0], s = sets[setId] || {};
+      const yr = s.releaseDate ? ` (${s.releaseDate.slice(0, 4)})` : "";
+      const head = `${x.name} — n°${x.localId} · `;
+      let sn = s.name || setId;
+      if ((head + sn + yr).length > 100) sn = sn.slice(0, Math.max(3, 100 - head.length - yr.length - 1)) + "…";
+      return { name: (head + sn + yr).slice(0, 100), value: `id:${x.id}` };
     });
   } catch { return []; }
 }
@@ -181,16 +232,18 @@ async function handleCarte(opts, it, env) {
       const { name, num } = parseQuery(input);
       hits = await searchCards(name);
       if (num) { const byNum = hits.filter(c => numOf(c.localId) === num); if (byNum.length) hits = byNum; }
+      const exact = hits.filter(c => norm(c.name) === name); if (exact.length) hits = exact;
       if (!hits.length) return followup(it, env, { content: `❌ Aucune carte trouvée pour **${input}**. Essaie le nom FR + numéro, ex : \`Dracaufeu ex 125\`.` });
       if (hits.length > 1) {
         const sets = await getSets();
-        const lines = hits.slice(-12).reverse().map(c => `• **${c.name}** — n°${c.localId} · ${sets[c.id.split("-")[0]]?.name || c.id}`).join("\n");
+        const lines = hits.slice(0, 20).map(c => `• **${c.name}** — n°${c.localId} · ${sets[c.id.split("-")[0]]?.name || c.id}`).join("\n");
         return followup(it, env, { content: `🔎 ${hits.length} cartes correspondent — refais \`/carte\` en choisissant dans l'autocomplétion, ou ajoute le numéro :\n${lines}` });
       }
       cardId = hits[0].id;
     }
 
-    const card = await fetch(`${TCGDEX}/cards/${cardId}`).then(r => r.ok ? r.json() : null);
+    let card = await fetch(`${TCGDEX}/cards/${cardId}`).then(r => r.ok ? r.json() : null);
+    if (!card) card = await fetch(`https://api.tcgdex.net/v2/en/cards/${cardId}`).then(r => r.ok ? r.json() : null);
     if (!card) return followup(it, env, { content: "❌ Carte introuvable." });
     const set = await fetch(`${TCGDEX}/sets/${card.set.id}`).then(r => r.ok ? r.json() : null);
     const cm = card.pricing?.cardmarket, tp = card.pricing?.tcgplayer;
