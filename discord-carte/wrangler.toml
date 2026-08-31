@@ -1,6 +1,10 @@
 name = "pokewatch-carte"
 main = "worker.js"
 compatibility_date = "2026-08-01"
+workers_dev = true
+
+[observability]
+enabled = true
 
 [vars]
 DISCORD_APPLICATION_ID = "1543952959749099632"
