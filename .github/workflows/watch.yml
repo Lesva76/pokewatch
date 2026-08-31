@@ -28,7 +28,7 @@ jobs:
 
       - name: Run watcher
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL || secrets.LESVA }}
           EXTRA_FEEDS: ${{ secrets.EXTRA_FEEDS }}
         run: python watcher.py
 
