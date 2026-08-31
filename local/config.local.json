@@ -1,0 +1,21 @@
+{
+  "_note": "Config PC (IP résidentielle). Retailers uniquement : Dealabs + boutiques restent dans le cloud pour éviter les doublons.",
+  "must_match": ["pok[eé]mon", "pkmn", "\\btcg\\b", "jcc pok"],
+  "exclude": ["peluche", "figurine", "funko", "lego", "sac [àa] dos", "classeur", "portfolio", "sleeves", "prot[èe]ge[- ]cartes", "playmat",
+              "deck box", "\\bswitch\\b", "jeu vid[ée]o", "puzzle", "cor[ée]en", "japonais", "japanese", "\\bjp\\b", "chinois", "\\banglais\\b",
+              "occasion", "pack commun", "pack rare"],
+  "max_price": {"display": 189.0, "demi_display": 99.0, "etb": 49.9, "bundle": 29.9, "tripack": 15.0, "coffret": 29.9, "tin": 22.0, "blister": 7.0, "booster": 5.0},
+  "alert_if_price_unknown": false,
+  "alert_untyped_pokemon_deals": false,
+  "alert_restock": true,
+  "sources": [
+    {"type": "listing", "name": "Micromania cartes Pokémon", "url": "https://www.micromania.fr/c/cartespokemon"},
+    {"type": "listing", "name": "Micromania displays",       "url": "https://www.micromania.fr/c/display-cartes-pokemon"},
+    {"type": "listing", "name": "Micromania boosters",       "url": "https://www.micromania.fr/c/booster-cartes-pokemon"},
+    {"type": "listing", "name": "Cultura display Pokémon", "url": "https://www.cultura.com/search/results?search_query=display%20pokemon",
+     "selectors": {"item": "article.one-card--product", "title": ".one-product__desc__name", "price": ".price", "link": "a.one-product"}},
+    {"type": "listing", "name": "Cultura coffret Pokémon", "url": "https://www.cultura.com/search/results?search_query=coffret%20pokemon",
+     "selectors": {"item": "article.one-card--product", "title": ".one-product__desc__name", "price": ".price", "link": "a.one-product"}}
+  ],
+  "watchlist": []
+}
